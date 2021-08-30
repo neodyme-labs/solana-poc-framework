@@ -1,6 +1,16 @@
 # Solana PoC Framework
 
+![](https://img.shields.io/crates/v/poc-framework) ![](https://docs.rs/poc-framework/badge.svg)
+
 **DISCLAIMER: any illegal usage of this framework is heavily discouraged. Most projects on Solana offer a more than generous bug bounty. Also you don't want your kneecaps broken.**
+
+## Usage
+To get started, just add the following line to the `dependencies` section in your `Cargo.toml`:
+```toml
+[dependencies]
+poc-framework = "0.1.0"
+```
+This crate already re-exports every Solana dependency you should need.
 
 ## What this framework is for
 This framework was made for security researchers, to facilitate a fast and convenient development of Proof-of-Concepts for bugs in Solana smart contracts or even Solana core. The generic `Environment` interface allows for exploits to be developed locally, and then tested on Testnet or Devnet.
