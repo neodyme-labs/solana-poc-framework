@@ -1,6 +1,6 @@
 # Solana PoC Framework
 
-![](https://img.shields.io/crates/v/poc-framework) ![](https://docs.rs/poc-framework/badge.svg)
+[![](https://img.shields.io/crates/v/poc-framework)](https://crates.io/crates/poc-framework) [![](https://docs.rs/poc-framework/badge.svg)](https://docs.rs/poc-framework/)
 
 **DISCLAIMER: any illegal usage of this framework is heavily discouraged. Most projects on Solana offer a more than generous bug bounty. Also you don't want your kneecaps broken.**
 
