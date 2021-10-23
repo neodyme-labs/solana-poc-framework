@@ -726,6 +726,7 @@ impl LocalEnvironmentBuilder {
             false,
             AccountShrinkThreshold::default(),
             false,
+            None,
         );
         LocalEnvironment {
             bank,
