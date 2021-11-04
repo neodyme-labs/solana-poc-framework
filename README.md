@@ -8,7 +8,7 @@
 To get started, just add the following line to the `dependencies` section in your `Cargo.toml`:
 ```toml
 [dependencies]
-poc-framework = "0.1.1"
+poc-framework = "0.1.2"
 ```
 This crate already re-exports every Solana dependency you should need.
 
