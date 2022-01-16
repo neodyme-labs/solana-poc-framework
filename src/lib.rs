@@ -73,6 +73,8 @@ mod programs;
 pub trait Environment {
     /// Returns the keypair used to pay for all transactions. All transaction fees and rent costs are payed for by this keypair.
     fn payer(&self) -> Keypair;
+    /// Sets the payer account
+    fn set_payer(&mut self, payer: &Keypair);
     /// Executes the batch of transactions in the right order and waits for them to be confirmed. The execution results are returned.
     fn execute_transaction(&mut self, txs: Transaction) -> EncodedConfirmedTransaction;
     /// Fetch a recent blockhash, for construction of transactions.
@@ -329,6 +331,7 @@ pub trait Environment {
 pub struct LocalEnvironment {
     bank: Bank,
     faucet: Keypair,
+    payer: Keypair
 }
 
 impl LocalEnvironment {
@@ -341,12 +344,20 @@ impl LocalEnvironment {
     pub fn new() -> LocalEnvironment {
         Self::builder().build()
     }
+
+    pub fn faucet(&self) -> Keypair {
+        clone_keypair(&self.faucet)
+    }
 }
 
 impl Environment for LocalEnvironment {
     fn payer(&self) -> Keypair {
-        clone_keypair(&self.faucet)
+        clone_keypair(&self.payer)
     }
+
+    fn set_payer(&mut self, payer: &Keypair) {
+        self.payer = clone_keypair(payer);
+    }   
 
     fn execute_transaction(&mut self, tx: Transaction) -> EncodedConfirmedTransaction {
         let len = bincode::serialize(&tx).unwrap().len();
@@ -475,7 +486,7 @@ impl Environment for LocalEnvironment {
 
 pub struct LocalEnvironmentBuilder {
     config: GenesisConfig,
-    faucet: Keypair,
+    faucet: Keypair
 }
 
 impl LocalEnvironmentBuilder {
@@ -731,6 +742,7 @@ impl LocalEnvironmentBuilder {
         LocalEnvironment {
             bank,
             faucet: clone_keypair(&self.faucet),
+            payer: clone_keypair(&self.faucet)
         }
     }
 }
@@ -773,6 +785,10 @@ impl RemoteEnvironment {
 impl Environment for RemoteEnvironment {
     fn payer(&self) -> Keypair {
         clone_keypair(&self.payer)
+    }
+
+    fn set_payer(&mut self, payer: &Keypair) {
+        self.payer = clone_keypair(payer);
     }
 
     fn execute_transaction(&mut self, tx: Transaction) -> EncodedConfirmedTransaction {
