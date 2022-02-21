@@ -705,11 +705,11 @@ impl LocalEnvironmentBuilder {
 
     /// Finalizes the environment.
     pub fn build(&mut self) -> LocalEnvironment {
-        let tmpdir = TempDir::new().expect("make tempdir");
+        let tmpdir = Path::new("/tmp/");
 
         let bank = Bank::new_with_paths(
             &self.config,
-            vec![tmpdir.path().to_path_buf()],
+            vec![tmpdir.to_path_buf()],
             &[],
             None,
             Some(&Builtins {
