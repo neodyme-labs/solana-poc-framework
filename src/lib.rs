@@ -33,7 +33,7 @@ use solana_runtime::{
     accounts_db::AccountShrinkThreshold,
     accounts_index::AccountSecondaryIndexes,
     bank::{
-        Bank, Builtin, Builtins, ExecuteTimings, NonceRollbackInfo, TransactionBalancesSet,
+        Bank, Builtin, Builtins, NonceRollbackInfo, TransactionBalancesSet,
         TransactionResults,
     },
     genesis_utils,
@@ -348,6 +348,10 @@ impl LocalEnvironment {
     pub fn faucet(&self) -> Keypair {
         clone_keypair(&self.faucet)
     }
+    
+    pub fn bank(&mut self) -> &mut Bank {
+        &mut self.bank
+    }
 }
 
 impl Environment for LocalEnvironment {
@@ -376,7 +380,7 @@ impl Environment for LocalEnvironment {
         let tx_pre_token_balances =
             token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
         let slot = self.bank.slot();
-        let mut timings = ExecuteTimings::default();
+        let mut timings = Default::default();
         let (
             TransactionResults {
                 execution_results, ..
