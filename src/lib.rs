@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    convert::TryInto,
+    convert::{
+        TryFrom,
+        TryInto
+    },
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,7 +25,10 @@ use solana_program::{
     hash::Hash,
     instruction::Instruction,
     loader_instruction,
-    message::Message,
+    message::{
+        legacy::Message,
+        SanitizedMessage
+    },
     program_option::COption,
     program_pack::Pack,
     pubkey::Pubkey,
@@ -33,11 +39,18 @@ use solana_runtime::{
     accounts_db::AccountShrinkThreshold,
     accounts_index::AccountSecondaryIndexes,
     bank::{
-        Bank, Builtin, Builtins, NonceRollbackInfo, TransactionBalancesSet,
+        Bank,
         TransactionResults,
+        TransactionBalancesSet,
+        TransactionExecutionResult
+    },
+    builtins::{
+        Builtin,
+        Builtins,
     },
     genesis_utils,
 };
+use solana_program_runtime::timings::ExecuteTimings;
 use solana_sdk::{
     account::{Account, AccountSharedData},
     commitment_config::CommitmentConfig,
@@ -46,11 +59,14 @@ use solana_sdk::{
     signature::Keypair,
     signature::Signer,
     system_transaction,
-    transaction::Transaction,
+    transaction::{
+        VersionedTransaction,
+        Transaction
+    },
 };
 use solana_transaction_status::{
     token_balances, ConfirmedTransaction, EncodedConfirmedTransaction, InnerInstructions,
-    TransactionStatusMeta, TransactionWithStatusMeta, UiTransactionEncoding,
+    TransactionWithStatusMeta, TransactionStatusMeta, UiTransactionEncoding,
 };
 use spl_associated_token_account::get_associated_token_address;
 use tempfile::TempDir;
@@ -375,7 +391,11 @@ impl Environment for LocalEnvironment {
         }
         let txs = vec![tx];
 
-        let batch = self.bank.prepare_batch(txs.iter());
+        let versioned_txs = txs.clone().into_iter().map(|unversioned_tx| {
+            VersionedTransaction::from(unversioned_tx)
+        }).collect();
+        
+        let batch = self.bank.prepare_entry_batch(versioned_txs).unwrap();
         let mut mint_decimals = HashMap::new();
         let tx_pre_token_balances =
             token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
@@ -383,15 +403,13 @@ impl Environment for LocalEnvironment {
         let mut timings = Default::default();
         let (
             TransactionResults {
-                execution_results, ..
+                execution_results,
+                ..
             },
             TransactionBalancesSet {
                 pre_balances,
                 post_balances,
-                ..
             },
-            inner_instructions,
-            transaction_logs,
         ) = self.bank.load_execute_and_commit_transactions(
             &batch,
             std::usize::MAX,
@@ -406,44 +424,49 @@ impl Environment for LocalEnvironment {
         izip!(
             txs.iter(),
             execution_results.into_iter(),
-            inner_instructions.into_iter(),
             pre_balances.into_iter(),
             post_balances.into_iter(),
             tx_pre_token_balances.into_iter(),
             tx_post_token_balances.into_iter(),
-            transaction_logs.into_iter(),
         )
         .map(
             |(
                 tx,
-                (execute_result, nonce_rollback),
-                inner_instructions,
+                execution_result,
                 pre_balances,
                 post_balances,
                 pre_token_balances,
                 post_token_balances,
-                log_messages,
             )| {
-                let fee_calculator = nonce_rollback
-                    .map(|nonce_rollback| nonce_rollback.fee_calculator())
-                    .unwrap_or_else(|| self.bank.get_fee_calculator(&tx.message().recent_blockhash))
-                    .expect("FeeCalculator must exist");
-                let fee = fee_calculator.calculate_fee(tx.message());
+                let fee = self.bank.get_fee_for_message(&SanitizedMessage::try_from(tx.message.clone()).unwrap()).unwrap();
 
-                let inner_instructions = inner_instructions.map(|inner_instructions| {
-                    inner_instructions
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, instructions)| InnerInstructions {
-                            index: index as u8,
-                            instructions,
-                        })
-                        .filter(|i| !i.instructions.is_empty())
-                        .collect()
-                });
+                let (inner_instructions, log_messages) = match execution_result.clone() {
+                    TransactionExecutionResult::Executed(transaction_execution_details) => {
+                        (
+                            match transaction_execution_details.inner_instructions { 
+                                Some(inner_ix) => Some(inner_ix.into_iter()
+                                                            .enumerate()
+                                                            .map(|(index, instructions)| 
+                                                                InnerInstructions {
+                                                                    index: index as u8,
+                                                                    instructions,
+                                                                }
+                                                            )
+                                                            .filter(|i| !i.instructions.is_empty())
+                                                            .collect()),
+                                _ => None
+                            },
+                            transaction_execution_details.log_messages
+                        )
+                    }
+                    _ => (
+                        None,
+                        None,
+                    )
+                };
 
                 let tx_status_meta = TransactionStatusMeta {
-                    status: execute_result,
+                    status: execution_result.details().unwrap().clone().status,
                     fee,
                     pre_balances,
                     post_balances,
@@ -721,7 +744,6 @@ impl LocalEnvironmentBuilder {
         let bank = Bank::new_with_paths(
             &self.config,
             vec![tmpdir.path().to_path_buf()],
-            &[],
             None,
             Some(&Builtins {
                 genesis_builtins: [
@@ -732,7 +754,7 @@ impl LocalEnvironmentBuilder {
                 .iter()
                 .map(|p| Builtin::new(&p.0, p.1, p.2))
                 .collect(),
-                feature_builtins: vec![],
+                feature_transitions: vec![],
             }),
             AccountSecondaryIndexes {
                 keys: None,
@@ -742,6 +764,7 @@ impl LocalEnvironmentBuilder {
             AccountShrinkThreshold::default(),
             false,
             None,
+            None
         );
         LocalEnvironment {
             bank,
@@ -774,7 +797,7 @@ impl RemoteEnvironment {
     pub fn airdrop(&self, account: Pubkey, lamports: u64) {
         if self.client.get_balance(&account).expect("get balance") < lamports {
             println!("Requesting airdrop...");
-            let blockhash = self.client.get_recent_blockhash().unwrap().0;
+            let blockhash = self.client.get_latest_blockhash().unwrap();
             let sig = self
                 .client
                 .request_airdrop_with_blockhash(&account, lamports, &blockhash)
@@ -812,7 +835,7 @@ impl Environment for RemoteEnvironment {
     }
 
     fn get_recent_blockhash(&self) -> Hash {
-        self.client.get_recent_blockhash().unwrap().0
+        self.client.get_latest_blockhash().unwrap()
     }
 
     fn get_rent_excemption(&self, data: usize) -> u64 {
