@@ -50,9 +50,9 @@ use solana_runtime::{
     },
     genesis_utils,
 };
-use solana_program_runtime::timings::ExecuteTimings;
 use solana_sdk::{
     account::{Account, AccountSharedData},
+    clock::UnixTimestamp,
     commitment_config::CommitmentConfig,
     genesis_config::GenesisConfig,
     packet,
@@ -453,7 +453,8 @@ impl Environment for LocalEnvironment {
                                                                 }
                                                             )
                                                             .filter(|i| !i.instructions.is_empty())
-                                                            .collect()),
+                                                            .collect()
+                                                        ),
                                 _ => None
                             },
                             transaction_execution_details.log_messages
@@ -547,6 +548,11 @@ impl LocalEnvironmentBuilder {
         builder.add_account_with_data(spl_token::ID, bpf_loader::ID, programs::SPL_TOKEN, true);
         builder.add_account_with_lamports(rent::ID, sysvar::ID, 1);
         builder
+    }
+
+    pub fn set_creation_time(&mut self, unix_timestamp: UnixTimestamp) -> &mut Self {
+        self.config.creation_time = unix_timestamp;
+        self
     }
 
     /// Adds the account into the environment.
