@@ -1,3 +1,4 @@
+use crate::solana_sdk::clock::UnixTimestamp;
 use std::{
     collections::{HashMap, HashSet},
     convert::{
@@ -368,6 +369,24 @@ impl LocalEnvironment {
     pub fn bank(&mut self) -> &mut Bank {
         &mut self.bank
     }
+
+    /// Advance the bank to the next blockhash.
+    pub fn advance_blockhash(&self) -> Hash {
+        let parent_distance = if self.bank.slot() == 0 {
+            1
+        } else {
+            self.bank.slot() - self.bank.parent_slot()
+        };
+
+        for _ in 0..parent_distance {
+            let last_blockhash = self.bank.last_blockhash();
+            while self.bank.last_blockhash() == last_blockhash {
+                self.bank.register_tick(&Hash::new_unique())
+            }
+        }
+
+        self.get_recent_blockhash()
+    }
 }
 
 impl Environment for LocalEnvironment {
@@ -550,8 +569,9 @@ impl LocalEnvironmentBuilder {
         builder
     }
 
+    /// Sets the creation time of the network
     pub fn set_creation_time(&mut self, unix_timestamp: UnixTimestamp) -> &mut Self {
-        self.config.creation_time = unix_timestamp;
+        self.config.creation_time = unix_timestamp as UnixTimestamp;
         self
     }
 
@@ -745,11 +765,12 @@ impl LocalEnvironmentBuilder {
 
     /// Finalizes the environment.
     pub fn build(&mut self) -> LocalEnvironment {
-        let tmpdir = TempDir::new().expect("make tempdir");
+        let tmpdir = Path::new("/tmp/");
 
         let bank = Bank::new_with_paths(
             &self.config,
-            vec![tmpdir.path().to_path_buf()],
+            vec![tmpdir.to_path_buf()],
+            &[],
             None,
             Some(&Builtins {
                 genesis_builtins: [
@@ -772,11 +793,14 @@ impl LocalEnvironmentBuilder {
             None,
             None
         );
-        LocalEnvironment {
+
+        let env = LocalEnvironment {
             bank,
             faucet: clone_keypair(&self.faucet),
-            payer: clone_keypair(&self.faucet)
-        }
+        };
+        env.advance_blockhash();
+
+        env
     }
 }
 
