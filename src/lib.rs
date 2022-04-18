@@ -1,3 +1,4 @@
+use crate::solana_sdk::clock::UnixTimestamp;
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
@@ -531,6 +532,12 @@ impl LocalEnvironmentBuilder {
         builder.add_account_with_data(spl_token::ID, bpf_loader::ID, programs::SPL_TOKEN, true);
         builder.add_account_with_lamports(rent::ID, sysvar::ID, 1);
         builder
+    }
+
+    /// Sets the creation time of the network
+    pub fn set_creation_time(&mut self, unix_timestamp: UnixTimestamp) -> &mut Self {
+        self.config.creation_time = unix_timestamp as UnixTimestamp;
+        self
     }
 
     /// Adds the account into the environment.
