@@ -54,7 +54,6 @@ use solana_transaction_status::{
     TransactionStatusMeta, TransactionWithStatusMeta, UiTransactionEncoding,
 };
 use spl_associated_token_account::get_associated_token_address;
-use tempfile::TempDir;
 
 pub use bincode;
 pub use borsh;
