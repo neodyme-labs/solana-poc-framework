@@ -1,4 +1,5 @@
 use crate::solana_sdk::clock::UnixTimestamp;
+use std::convert::TryFrom;
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
@@ -23,7 +24,7 @@ use solana_program::{
     hash::Hash,
     instruction::Instruction,
     loader_instruction,
-    message::Message,
+    message::{v0::LoadedAddresses, Message, SanitizedMessage},
     program_option::COption,
     program_pack::Pack,
     pubkey::Pubkey,
@@ -34,9 +35,10 @@ use solana_runtime::{
     accounts_db::AccountShrinkThreshold,
     accounts_index::AccountSecondaryIndexes,
     bank::{
-        Bank, Builtin, Builtins, NonceRollbackInfo, TransactionBalancesSet,
+        Bank, TransactionBalancesSet, TransactionExecutionDetails, TransactionExecutionResult,
         TransactionResults,
     },
+    builtins::{Builtin, Builtins},
     genesis_utils,
 };
 use solana_sdk::{
@@ -47,11 +49,12 @@ use solana_sdk::{
     signature::Keypair,
     signature::Signer,
     system_transaction,
-    transaction::Transaction,
+    transaction::{Transaction, VersionedTransaction},
 };
 use solana_transaction_status::{
-    token_balances, ConfirmedTransaction, EncodedConfirmedTransaction, InnerInstructions,
-    TransactionStatusMeta, TransactionWithStatusMeta, UiTransactionEncoding,
+    token_balances, ConfirmedTransactionWithStatusMeta, EncodedConfirmedTransactionWithStatusMeta,
+    InnerInstructions, TransactionStatusMeta, TransactionTokenBalance, TransactionWithStatusMeta,
+    UiTransactionEncoding, VersionedTransactionWithStatusMeta,
 };
 use spl_associated_token_account::get_associated_token_address;
 
@@ -74,9 +77,17 @@ pub trait Environment {
     /// Returns the keypair used to pay for all transactions. All transaction fees and rent costs are payed for by this keypair.
     fn payer(&self) -> Keypair;
     /// Executes the batch of transactions in the right order and waits for them to be confirmed. The execution results are returned.
-    fn execute_transaction(&mut self, txs: Transaction) -> EncodedConfirmedTransaction;
+    fn execute_transaction(
+        &mut self,
+        txs: Transaction,
+    ) -> EncodedConfirmedTransactionWithStatusMeta;
     /// Fetch a recent blockhash, for construction of transactions.
-    fn get_recent_blockhash(&self) -> Hash;
+    #[deprecated(since = "0.2.0", note = "Please use `get_latest_blockhash()` instead")]
+    fn get_recent_blockhash(&self) -> Hash {
+        self.get_latest_blockhash()
+    }
+    /// Fetch the latest blockhash, for construction of transactions.
+    fn get_latest_blockhash(&self) -> Hash;
     /// Fetch the amount of lamports needed for an account of the given size to be rent excempt.
     fn get_rent_excemption(&self, data: usize) -> u64;
     /// Fetch an account. None if the account does not exist.
@@ -111,7 +122,7 @@ pub trait Environment {
             println!("unnecessary signature from {}", key.to_string());
         }
 
-        Transaction::new(&signer_vec, message, self.get_recent_blockhash())
+        Transaction::new(&signer_vec, message, self.get_latest_blockhash())
     }
 
     /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the payer.
@@ -119,7 +130,7 @@ pub trait Environment {
         &mut self,
         instructions: &[Instruction],
         signers: &[&Keypair],
-    ) -> EncodedConfirmedTransaction {
+    ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions(instructions, signers);
         return self.execute_transaction(tx);
     }
@@ -130,7 +141,7 @@ pub trait Environment {
         &mut self,
         instructions: &[Instruction],
         signers: &[&Keypair],
-    ) -> EncodedConfirmedTransaction {
+    ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions(instructions, signers);
         println!("{:#?}", &tx);
         return self.execute_transaction(tx);
@@ -141,11 +152,12 @@ pub trait Environment {
         self.execute_transaction(system_transaction::create_account(
             &self.payer(),
             &keypair,
-            self.get_recent_blockhash(),
+            self.get_latest_blockhash(),
             lamports,
             space as u64,
             &owner,
-        )).assert_success();
+        ))
+        .assert_success();
     }
 
     /// Executes a transaction constructing an empty rent-excempt account with the specified amount of space, owned by the provided program.
@@ -153,11 +165,12 @@ pub trait Environment {
         self.execute_transaction(system_transaction::create_account(
             &self.payer(),
             &keypair,
-            self.get_recent_blockhash(),
+            self.get_latest_blockhash(),
             self.get_rent_excemption(space),
             space as u64,
             &owner,
-        )).assert_success();
+        ))
+        .assert_success();
     }
 
     /// Executes a transaction constructing a token mint. The account needs to be empty and belong to system for this to work.
@@ -187,7 +200,8 @@ pub trait Environment {
                 .unwrap(),
             ],
             &[mint],
-        ).assert_success();
+        )
+        .assert_success();
     }
 
     /// Executes a transaction that mints tokens from a mint to an account belonging to that mint.
@@ -203,7 +217,8 @@ pub trait Environment {
             )
             .unwrap()],
             &[authority],
-        ).assert_success();
+        )
+        .assert_success();
     }
 
     /// Executes a transaction constructing a token account of the specified mint. The account needs to be empty and belong to system for this to work.
@@ -227,14 +242,15 @@ pub trait Environment {
                 .unwrap(),
             ],
             &[account],
-        ).assert_success();
+        )
+        .assert_success();
     }
 
     /// Executes a transaction constructing the associated token account of the specified mint belonging to the owner. This will fail if the account already exists.
     fn create_associated_token_account(&mut self, owner: &Keypair, mint: Pubkey) -> Pubkey {
         self.execute_as_transaction(
             &[
-                spl_associated_token_account::create_associated_token_account(
+                spl_associated_token_account::instruction::create_associated_token_account(
                     &self.payer().pubkey(),
                     &owner.pubkey(),
                     &mint,
@@ -260,11 +276,12 @@ pub trait Environment {
         self.execute_transaction(system_transaction::create_account(
             &self.payer(),
             account,
-            self.get_recent_blockhash(),
+            self.get_latest_blockhash(),
             self.get_rent_excemption(data.len()),
             data.len() as u64,
             &bpf_loader::id(),
-        )).assert_success();
+        ))
+        .assert_success();
 
         let mut offset = 0usize;
         for chunk in data.chunks(900) {
@@ -277,7 +294,8 @@ pub trait Environment {
                     chunk.to_vec(),
                 )],
                 &[account],
-            ).assert_success();
+            )
+            .assert_success();
             offset += chunk.len();
         }
     }
@@ -299,7 +317,8 @@ pub trait Environment {
                     &bpf_loader::id(),
                 )],
                 &[&keypair],
-            ).assert_success();
+            )
+            .assert_success();
         }
 
         keypair.pubkey()
@@ -361,7 +380,7 @@ impl LocalEnvironment {
             }
         }
 
-        self.get_recent_blockhash()
+        self.get_latest_blockhash()
     }
 }
 
@@ -370,7 +389,10 @@ impl Environment for LocalEnvironment {
         clone_keypair(&self.faucet)
     }
 
-    fn execute_transaction(&mut self, tx: Transaction) -> EncodedConfirmedTransaction {
+    fn execute_transaction(
+        &mut self,
+        tx: Transaction,
+    ) -> EncodedConfirmedTransactionWithStatusMeta {
         let len = bincode::serialize(&tx).unwrap().len();
         if len > packet::PACKET_DATA_SIZE {
             panic!(
@@ -382,7 +404,7 @@ impl Environment for LocalEnvironment {
         }
         let txs = vec![tx];
 
-        let batch = self.bank.prepare_batch(txs.iter());
+        let batch = self.bank.prepare_batch_for_tests(txs.clone());
         let mut mint_decimals = HashMap::new();
         let tx_pre_token_balances =
             token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
@@ -397,11 +419,10 @@ impl Environment for LocalEnvironment {
                 post_balances,
                 ..
             },
-            inner_instructions,
-            transaction_logs,
         ) = self.bank.load_execute_and_commit_transactions(
             &batch,
-            std::usize::MAX,
+            usize::MAX,
+            true,
             true,
             true,
             true,
@@ -413,29 +434,35 @@ impl Environment for LocalEnvironment {
         izip!(
             txs.iter(),
             execution_results.into_iter(),
-            inner_instructions.into_iter(),
             pre_balances.into_iter(),
             post_balances.into_iter(),
             tx_pre_token_balances.into_iter(),
             tx_post_token_balances.into_iter(),
-            transaction_logs.into_iter(),
         )
         .map(
             |(
                 tx,
-                (execute_result, nonce_rollback),
-                inner_instructions,
+                execution_result,
                 pre_balances,
                 post_balances,
                 pre_token_balances,
                 post_token_balances,
-                log_messages,
+            ): (
+                &Transaction,
+                TransactionExecutionResult,
+                Vec<u64>,
+                Vec<u64>,
+                Vec<TransactionTokenBalance>,
+                Vec<TransactionTokenBalance>,
             )| {
-                let fee_calculator = nonce_rollback
-                    .map(|nonce_rollback| nonce_rollback.fee_calculator())
-                    .unwrap_or_else(|| self.bank.get_fee_calculator(&tx.message().recent_blockhash))
-                    .expect("FeeCalculator must exist");
-                let fee = fee_calculator.calculate_fee(tx.message());
+                let fee = self.bank.get_fee_for_message(&SanitizedMessage::try_from(tx.message().clone()).expect("Failed to sanitize transaction"))
+                    .expect("Fee calculation must succeed");
+
+                let (status, inner_instructions, log_messages) = match execution_result {
+                    TransactionExecutionResult::Executed { details: TransactionExecutionDetails { status, inner_instructions, log_messages, .. }, .. } =>
+                        (status, inner_instructions, log_messages),
+                    TransactionExecutionResult::NotExecuted(err) => (Err(err), None, None)
+                };
 
                 let inner_instructions = inner_instructions.map(|inner_instructions| {
                     inner_instructions
@@ -450,7 +477,7 @@ impl Environment for LocalEnvironment {
                 });
 
                 let tx_status_meta = TransactionStatusMeta {
-                    status: execute_result,
+                    status,
                     fee,
                     pre_balances,
                     post_balances,
@@ -459,14 +486,19 @@ impl Environment for LocalEnvironment {
                     inner_instructions,
                     log_messages,
                     rewards: None,
+                    loaded_addresses: LoadedAddresses {
+                        writable: vec![], // TODO
+                        readonly: vec![], // TODO
+                    },
+                    return_data: None
                 };
 
-                ConfirmedTransaction {
+                ConfirmedTransactionWithStatusMeta {
                     slot,
-                    transaction: TransactionWithStatusMeta {
-                        transaction: tx.clone(),
-                        meta: Some(tx_status_meta),
-                    },
+                    tx_with_meta: TransactionWithStatusMeta::Complete(VersionedTransactionWithStatusMeta {
+                        transaction: VersionedTransaction::from(tx.clone()),
+                        meta: tx_status_meta,
+                    }),
                     block_time: Some(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -476,13 +508,14 @@ impl Environment for LocalEnvironment {
                             .unwrap(),
                     ),
                 }
-                .encode(UiTransactionEncoding::Binary)
+                .encode(UiTransactionEncoding::Binary, None)
+                .expect("Failed to encode transaction")
             },
         )
         .next().expect("transaction could not be executed. Enable debug logging to get more information on why")
     }
 
-    fn get_recent_blockhash(&self) -> Hash {
+    fn get_latest_blockhash(&self) -> Hash {
         self.bank.last_blockhash()
     }
 
@@ -734,7 +767,6 @@ impl LocalEnvironmentBuilder {
         let bank = Bank::new_with_paths(
             &self.config,
             vec![tmpdir.to_path_buf()],
-            &[],
             None,
             Some(&Builtins {
                 genesis_builtins: [
@@ -745,7 +777,7 @@ impl LocalEnvironmentBuilder {
                 .iter()
                 .map(|p| Builtin::new(&p.0, p.1, p.2))
                 .collect(),
-                feature_builtins: vec![],
+                feature_transitions: vec![],
             }),
             AccountSecondaryIndexes {
                 keys: None,
@@ -754,6 +786,7 @@ impl LocalEnvironmentBuilder {
             false,
             AccountShrinkThreshold::default(),
             false,
+            None,
             None,
         );
 
@@ -790,7 +823,7 @@ impl RemoteEnvironment {
     pub fn airdrop(&self, account: Pubkey, lamports: u64) {
         if self.client.get_balance(&account).expect("get balance") < lamports {
             println!("Requesting airdrop...");
-            let blockhash = self.client.get_recent_blockhash().unwrap().0;
+            let blockhash = self.client.get_latest_blockhash().unwrap();
             let sig = self
                 .client
                 .request_airdrop_with_blockhash(&account, lamports, &blockhash)
@@ -807,7 +840,10 @@ impl Environment for RemoteEnvironment {
         clone_keypair(&self.payer)
     }
 
-    fn execute_transaction(&mut self, tx: Transaction) -> EncodedConfirmedTransaction {
+    fn execute_transaction(
+        &mut self,
+        tx: Transaction,
+    ) -> EncodedConfirmedTransactionWithStatusMeta {
         let sig = match self.client.send_and_confirm_transaction(&tx) {
             Err(e) => panic!("{:#?}", e),
             Ok(sig) => sig,
@@ -818,13 +854,14 @@ impl Environment for RemoteEnvironment {
                 RpcTransactionConfig {
                     encoding: Some(UiTransactionEncoding::Binary),
                     commitment: Some(CommitmentConfig::confirmed()),
+                    ..RpcTransactionConfig::default()
                 },
             )
             .unwrap()
     }
 
-    fn get_recent_blockhash(&self) -> Hash {
-        self.client.get_recent_blockhash().unwrap().0
+    fn get_latest_blockhash(&self) -> Hash {
+        self.client.get_latest_blockhash().unwrap()
     }
 
     fn get_rent_excemption(&self, data: usize) -> u64 {
@@ -855,30 +892,33 @@ pub trait PrintableTransaction {
     fn assert_success(&self);
 }
 
-impl PrintableTransaction for ConfirmedTransaction {
+impl PrintableTransaction for ConfirmedTransactionWithStatusMeta {
     fn print_named(&self, name: &str) {
-        let tx = self.transaction.transaction.clone();
-        let encoded = self.clone().encode(UiTransactionEncoding::JsonParsed);
+        let tx = self.tx_with_meta.get_transaction();
+        let encoded = self
+            .clone()
+            .encode(UiTransactionEncoding::JsonParsed, None)
+            .expect("Failed to encode");
         println!("EXECUTE {} (slot {})", name, encoded.slot);
-        println_transaction(&tx, &encoded.transaction.meta, "  ", None, None);
+        println_transaction(&tx, encoded.transaction.meta.as_ref(), "  ", None, None);
     }
 
     fn assert_success(&self) {
-        match &self.transaction.meta {
+        match &self.tx_with_meta.get_status_meta() {
             Some(meta) if meta.status.is_err() => {
                 self.print();
                 panic!("tx failed!")
-            },
+            }
             _ => (),
         }
     }
 }
 
-impl PrintableTransaction for EncodedConfirmedTransaction {
+impl PrintableTransaction for EncodedConfirmedTransactionWithStatusMeta {
     fn print_named(&self, name: &str) {
         let tx = self.transaction.transaction.decode().unwrap();
         println!("EXECUTE {} (slot {})", name, self.slot);
-        println_transaction(&tx, &self.transaction.meta, "  ", None, None);
+        println_transaction(&tx, self.transaction.meta.as_ref(), "  ", None, None);
     }
 
     fn assert_success(&self) {
@@ -886,7 +926,7 @@ impl PrintableTransaction for EncodedConfirmedTransaction {
             Some(meta) if meta.err.is_some() => {
                 self.print();
                 panic!("tx failed!")
-            },
+            }
             _ => (),
         }
     }
