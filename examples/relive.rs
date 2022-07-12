@@ -1,34 +1,39 @@
 use std::{
     cell::RefCell,
-    convert::TryInto,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
 };
+use std::convert::TryFrom;
 
 use once_cell::sync::OnceCell;
+use solana_program::hash::Hash;
 use poc_framework::*;
+use solana_program::message::SanitizedMessage;
 use solana_program::pubkey;
-use solana_runtime::{
-    bank::TxComputeMeter,
+use solana_program::rent::Rent;
+use solana_program_runtime::{
+    compute_budget::ComputeBudget,
+    invoke_context::{ComputeMeter, Executors, ProcessInstructionWithContext},
     log_collector::LogCollector,
-    message_processor::{Executors, MessageProcessor},
-    rent_collector::RentCollector,
+    sysvar_cache::SysvarCache,
 };
+use solana_program_runtime::invoke_context::BuiltinProgram;
+use solana_runtime::{message_processor::MessageProcessor, rent_collector::RentCollector};
+use solana_runtime::message_processor::ProcessedMessageInfo;
 use solana_sdk::{
     account::{Account, AccountSharedData, ReadableAccount},
     feature_set::FeatureSet,
     instruction::Instruction,
     message::Message,
-    process_instruction::{BpfComputeBudget, ProcessInstructionWithContext},
     program_pack::Pack,
     pubkey::Pubkey,
     sysvar,
-    sysvar_cache::SysvarCache,
     transaction::{Transaction, TransactionError},
 };
+use solana_sdk::transaction_context::{TransactionAccount, TransactionContext};
 
 type SerializedTxExecution = (
     Transaction,
@@ -38,19 +43,11 @@ type SerializedTxExecution = (
 );
 
 const EXTRACT_ACCOUNTS_PROGRAM: Pubkey = pubkey!("Extract1111111111111111111111111111111111111");
-static BUILTIN_PROGRAMS: OnceCell<Vec<(Pubkey, ProcessInstructionWithContext)>> = OnceCell::new();
+static BUILTIN_PROGRAMS: OnceCell<Vec<BuiltinProgram>> = OnceCell::new();
 static RENT_COLLECTOR: OnceCell<RentCollector> = OnceCell::new();
 
 fn init_builtin_programs() {
     let mut env = LocalEnvironment::builder().build();
-    env.bank().add_builtin(
-        "extract_accounts",
-        EXTRACT_ACCOUNTS_PROGRAM,
-        |_id, _data, ctx| {
-            let _ = BUILTIN_PROGRAMS.set(ctx.get_programs().to_vec());
-            Ok(())
-        },
-    );
     env.execute_as_transaction(
         &[Instruction {
             program_id: EXTRACT_ACCOUNTS_PROGRAM,
@@ -76,51 +73,45 @@ fn update_ix_sysvar(accs: &[(Pubkey, Rc<RefCell<AccountSharedData>>)], message: 
 fn execute(
     tx: &Transaction,
     loaders: &[Vec<(Pubkey, Rc<RefCell<AccountSharedData>>)>],
-    accounts: &[(Pubkey, Rc<RefCell<AccountSharedData>>)],
-) -> (Result<(), TransactionError>, Vec<String>) {
-    let mut message_processor = MessageProcessor::default();
-    for (pk, processor) in BUILTIN_PROGRAMS.get().unwrap() {
-        message_processor.add_program(*pk, *processor);
-    }
-
+    accounts: Vec<TransactionAccount>,
+) -> (Result<ProcessedMessageInfo, TransactionError>, Vec<String>) {
     let executors = Rc::new(RefCell::new(Executors::default()));
-    let compute_meter = Rc::new(RefCell::new(TxComputeMeter::new(
-        BpfComputeBudget::new().max_units + 10000000000000,
-    )));
+    let compute_meter = ComputeMeter::new_ref(10000000000000);
     let mut timings = Default::default();
     let mut sysvar_cache = SysvarCache::default();
-    sysvar_cache.push_entry(
-        sysvar::clock::id(),
-        bincode::serialize(&sysvar::clock::Clock {
-            slot: 119342570,
-            epoch_start_timestamp: 1644004275 - 60 * 60 * 24,
-            epoch: 276,
-            leader_schedule_epoch: 276,
-            unix_timestamp: 1644004275,
-        })
-        .unwrap(),
-    );
-    let log_collector = Rc::new(LogCollector::default());
+    sysvar_cache.set_clock(sysvar::clock::Clock {
+        slot: 119342570,
+        epoch_start_timestamp: 1644004275 - 60 * 60 * 24,
+        epoch: 276,
+        leader_schedule_epoch: 276,
+        unix_timestamp: 1644004275,
+    });
+    let log_collector = Rc::new(RefCell::new(LogCollector::default()));
 
-    let res = message_processor.process_message(
-        tx.message(),
-        &loaders,
-        &accounts,
-        &RENT_COLLECTOR.get().unwrap(),
-        Some(log_collector.clone()),
+    let mut context = TransactionContext::new(accounts, 1, 1, 10000);
+
+    let res = MessageProcessor::process_message(
+        BUILTIN_PROGRAMS.get().unwrap(),
+        &SanitizedMessage::try_from(tx.message().clone()).unwrap(),
+        &[vec![0]],
+        &mut context,
+        Rent::default(),
+        Some(Rc::clone(&log_collector)),
         executors,
-        None,
         Arc::new(FeatureSet::all_enabled()),
-        BpfComputeBudget::new(),
-        compute_meter,
+        ComputeBudget::new(10000000),
         &mut timings,
         &sysvar_cache,
+        Hash::default(),
+        0,
+        0,
+        &mut 0,
     );
 
-    (res, Rc::try_unwrap(log_collector).ok().unwrap().into())
+    (res, Rc::try_unwrap(log_collector).ok().unwrap().take().into())
 }
 
-fn print_tx_result(result: (Result<(), TransactionError>, Vec<String>)) {
+fn print_tx_result(result: (Result<ProcessedMessageInfo, TransactionError>, Vec<String>)) {
     let (status, logs) = result;
     for log in logs {
         println!("{}", log);
@@ -157,12 +148,12 @@ fn get_token_acc(
 fn main() {
     init_builtin_programs();
 
-    let path = PathBuf::from(todo!());
+    let path: PathBuf = todo!();
     let mut file = File::open(path).expect("open file");
 
     let execution: SerializedTxExecution =
         bincode::deserialize_from(&mut file).expect("deserialize");
-    let (tx, loaders, accounts, rent_collector) = execution;
+    let (new_tx, loaders, accounts, rent_collector) = execution;
     RENT_COLLECTOR.set(rent_collector).unwrap();
     let loaders = loaders
         .into_iter()
