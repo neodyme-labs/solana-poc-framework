@@ -12,7 +12,7 @@ description = "A framework for creating PoC's for Solana Smart Contracts in a pa
 [dependencies]
 itertools = "0.10.1"
 bincode = "1.3.3"
-rand = "0.7.3"
+rand = "0.8.5"
 borsh = "0.9.1"
 solana-sdk = "=1.11.2"
 solana-program = "=1.11.2"
