@@ -421,12 +421,13 @@ impl Environment for LocalEnvironment {
             },
         ) = self.bank.load_execute_and_commit_transactions(
             &batch,
-            usize::MAX,
-            true,
-            true,
-            true,
-            true,
+            /*max_age*/ usize::MAX,
+            /*collect_balancs*/ true,
+            /*enable_cpi_recording*/ true,
+            /*enable_log_recording*/ true,
+            /*enable_return_data_recording*/ true,
             &mut timings,
+            /*log_messages_bytes_limit*/ None,
         );
 
         let tx_post_token_balances =
