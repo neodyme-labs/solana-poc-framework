@@ -254,6 +254,7 @@ pub trait Environment {
                     &self.payer().pubkey(),
                     &owner.pubkey(),
                     &mint,
+                    &spl_token::ID,
                 ),
             ],
             &[],
@@ -407,7 +408,7 @@ impl Environment for LocalEnvironment {
         let batch = self.bank.prepare_batch_for_tests(txs.clone());
         let mut mint_decimals = HashMap::new();
         let tx_pre_token_balances =
-            token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
+            solana_ledger::token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
         let slot = self.bank.slot();
         let mut timings = Default::default();
         let (
@@ -427,10 +428,11 @@ impl Environment for LocalEnvironment {
             true,
             true,
             &mut timings,
+            None
         );
 
         let tx_post_token_balances =
-            token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
+            solana_ledger::token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
         izip!(
             txs.iter(),
             execution_results.into_iter(),
@@ -458,11 +460,28 @@ impl Environment for LocalEnvironment {
                 let fee = self.bank.get_fee_for_message(&SanitizedMessage::try_from(tx.message().clone()).expect("Failed to sanitize transaction"))
                     .expect("Fee calculation must succeed");
 
-                let (status, inner_instructions, log_messages) = match execution_result {
-                    TransactionExecutionResult::Executed { details: TransactionExecutionDetails { status, inner_instructions, log_messages, .. }, .. } =>
-                        (status, inner_instructions, log_messages),
-                    TransactionExecutionResult::NotExecuted(err) => (Err(err), None, None)
-                };
+                let status;
+                let inner_instructions;
+                let log_messages;
+                let return_data;
+                let compute_units_consumed;
+
+                match execution_result {
+                    TransactionExecutionResult::Executed { details, executors: _ } => {
+                        status = details.status;
+                        inner_instructions = details.inner_instructions;
+                        log_messages = details.log_messages;
+                        return_data = details.return_data;
+                        compute_units_consumed = Some(details.executed_units);
+                    }
+                    TransactionExecutionResult::NotExecuted(err) => {
+                        status = Err(err);
+                        inner_instructions = None;
+                        log_messages = None;
+                        return_data = None;
+                        compute_units_consumed = None;
+                    }
+                }
 
                 let inner_instructions = inner_instructions.map(|inner_instructions| {
                     inner_instructions
@@ -486,11 +505,9 @@ impl Environment for LocalEnvironment {
                     inner_instructions,
                     log_messages,
                     rewards: None,
-                    loaded_addresses: LoadedAddresses {
-                        writable: vec![], // TODO
-                        readonly: vec![], // TODO
-                    },
-                    return_data: None
+                    loaded_addresses: batch.sanitized_transactions()[0].get_loaded_addresses(),
+                    return_data,
+                    compute_units_consumed,
                 };
 
                 ConfirmedTransactionWithStatusMeta {
