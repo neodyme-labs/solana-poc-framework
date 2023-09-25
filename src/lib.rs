@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     path::Path,
+    sync::{atomic::AtomicBool, Arc},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,10 +13,6 @@ use itertools::izip;
 use rand::{prelude::StdRng, rngs::OsRng, SeedableRng};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
-use solana_bpf_loader_program::{
-    solana_bpf_loader_deprecated_program, solana_bpf_loader_program,
-    solana_bpf_loader_upgradeable_program,
-};
 use solana_cli_output::display::println_transaction;
 use solana_client::{rpc_client::RpcClient, rpc_config::RpcTransactionConfig};
 use solana_program::{
@@ -34,8 +31,8 @@ use solana_runtime::{
     accounts_db::AccountShrinkThreshold,
     accounts_index::AccountSecondaryIndexes,
     bank::{Bank, TransactionBalancesSet, TransactionExecutionResult, TransactionResults},
-    builtins::{Builtin, Builtins},
     genesis_utils,
+    runtime_config::RuntimeConfig,
 };
 use solana_sdk::{
     account::{Account, AccountSharedData},
@@ -126,7 +123,7 @@ pub trait Environment {
         &self,
         instructions: &[Instruction],
         signers: &[&Keypair],
-        new_payer: Keypair
+        new_payer: Keypair,
     ) -> Transaction {
         let payer = new_payer;
         let mut signer_vec = vec![&payer];
@@ -169,7 +166,7 @@ pub trait Environment {
         &mut self,
         instructions: &[Instruction],
         signers: &[&Keypair],
-        new_payer: Keypair
+        new_payer: Keypair,
     ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions_with_payer(instructions, signers, new_payer);
         return self.execute_transaction(tx);
@@ -523,10 +520,7 @@ impl Environment for LocalEnvironment {
         let compute_units_consumed;
 
         match execution_result {
-            TransactionExecutionResult::Executed {
-                details,
-                executors: _,
-            } => {
+            TransactionExecutionResult::Executed { details, .. } => {
                 status = details.status;
                 inner_instructions = details.inner_instructions;
                 log_messages = details.log_messages;
@@ -546,9 +540,18 @@ impl Environment for LocalEnvironment {
             inner_instructions
                 .into_iter()
                 .enumerate()
-                .map(|(index, instructions)| InnerInstructions {
-                    index: index as u8,
-                    instructions,
+                .map(|(index, instructions)| {
+                    let inner_ixs_mapped = instructions
+                        .into_iter()
+                        .map(|x| solana_transaction_status::InnerInstruction {
+                            instruction: x.instruction,
+                            stack_height: Some(x.stack_height as u32),
+                        })
+                        .collect();
+                    InnerInstructions {
+                        index: index as u8,
+                        instructions: inner_ixs_mapped,
+                    }
                 })
                 .filter(|i| !i.instructions.is_empty())
                 .collect()
@@ -840,31 +843,22 @@ impl LocalEnvironmentBuilder {
     /// Finalizes the environment.
     pub fn build(&mut self) -> LocalEnvironment {
         let tmpdir = Path::new("/tmp/");
-
+        let exit = Arc::new(AtomicBool::new(false));
         let bank = Bank::new_with_paths(
             &self.config,
+            Arc::new(RuntimeConfig::default()),
             vec![tmpdir.to_path_buf()],
             None,
-            Some(&Builtins {
-                genesis_builtins: [
-                    solana_bpf_loader_upgradeable_program!(),
-                    solana_bpf_loader_program!(),
-                    solana_bpf_loader_deprecated_program!(),
-                ]
-                .iter()
-                .map(|p| Builtin::new(&p.0, p.1, p.2))
-                .collect(),
-                feature_transitions: vec![],
-            }),
+            None,
             AccountSecondaryIndexes {
                 keys: None,
                 indexes: HashSet::new(),
             },
-            false,
             AccountShrinkThreshold::default(),
             false,
             None,
             None,
+            &exit,
         );
 
         let env = LocalEnvironment {
