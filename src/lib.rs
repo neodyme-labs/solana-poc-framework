@@ -40,6 +40,7 @@ use solana_runtime::{
 use solana_sdk::{
     account::{Account, AccountSharedData},
     commitment_config::CommitmentConfig,
+    feature_set,
     genesis_config::GenesisConfig,
     packet,
     signature::Keypair,
@@ -559,6 +560,10 @@ impl LocalEnvironmentBuilder {
             &[],
         );
         genesis_utils::activate_all_features(&mut config);
+        // Deactivate fix_recent_blockhashes feature to allow for advancing blockhashes without creating new banks
+        config
+            .accounts
+            .remove(&feature_set::fix_recent_blockhashes::id());
 
         let mut builder = LocalEnvironmentBuilder { faucet, config };
         builder.add_account_with_data(
