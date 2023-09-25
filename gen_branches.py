@@ -3,10 +3,8 @@ from git import Repo
 import toml
 BRANCHES = [
     '1.11',
-    '1.12',
     '1.13',
     '1.14',
-    '1.15',
     '1.16',
 ]
 
@@ -41,7 +39,7 @@ for branch in BRANCHES:
         with open('Cargo.toml') as f:
             cargo = toml.load(f)
         for module in IMPORTANT_MODULES:
-            cargo['dependencies'][module] = f'{branch}'
+            cargo['dependencies'][module] = f'~{branch}'
         with open('Cargo.toml', 'w') as f:
             toml.dump(cargo, f)
 
