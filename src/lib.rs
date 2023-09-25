@@ -121,6 +121,39 @@ pub trait Environment {
         Transaction::new(&signer_vec, message, self.get_latest_blockhash())
     }
 
+    /// Assemble the given instructions into a transaction and sign it. All transactions constructed by this method are signed and payed for by the new_payer.
+    fn tx_with_instructions_with_payer(
+        &self,
+        instructions: &[Instruction],
+        signers: &[&Keypair],
+        new_payer: Keypair
+    ) -> Transaction {
+        let payer = new_payer;
+        let mut signer_vec = vec![&payer];
+        signer_vec.extend_from_slice(signers);
+
+        let message = Message::new(instructions, Some(&payer.pubkey()));
+        let num_sigs: usize = message.header.num_required_signatures.into();
+        let required_sigs = message.account_keys[..num_sigs]
+            .into_iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let provided_sigs = signer_vec
+            .iter()
+            .map(|x| x.pubkey())
+            .collect::<HashSet<_>>();
+
+        for key in required_sigs.difference(&provided_sigs) {
+            println!("missing signature from {}", key.to_string());
+        }
+
+        for key in provided_sigs.difference(&required_sigs) {
+            println!("unnecessary signature from {}", key.to_string());
+        }
+
+        Transaction::new(&signer_vec, message, self.get_latest_blockhash())
+    }
+
     /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the payer.
     fn execute_as_transaction(
         &mut self,
@@ -132,6 +165,17 @@ pub trait Environment {
     }
 
     /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the payer.
+    fn execute_as_transaction_with_payer(
+        &mut self,
+        instructions: &[Instruction],
+        signers: &[&Keypair],
+        new_payer: Keypair
+    ) -> EncodedConfirmedTransactionWithStatusMeta {
+        let tx = self.tx_with_instructions_with_payer(instructions, signers, new_payer);
+        return self.execute_transaction(tx);
+    }
+
+    /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the payer.
     /// Prints the transaction before sending it.
     fn execute_as_transaction_debug(
         &mut self,
@@ -139,6 +183,19 @@ pub trait Environment {
         signers: &[&Keypair],
     ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions(instructions, signers);
+        println!("{:#?}", &tx);
+        return self.execute_transaction(tx);
+    }
+
+    /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the new_payer.
+    /// Prints the transaction before sending it.
+    fn execute_as_transaction_with_payer_debug(
+        &mut self,
+        instructions: &[Instruction],
+        signers: &[&Keypair],
+        new_payer: Keypair,
+    ) -> EncodedConfirmedTransactionWithStatusMeta {
+        let tx = self.tx_with_instructions_with_payer(instructions, signers, new_payer);
         println!("{:#?}", &tx);
         return self.execute_transaction(tx);
     }
