@@ -8,9 +8,16 @@
 To get started, just add the following line to the `dependencies` section in your `Cargo.toml`:
 ```toml
 [dependencies]
-poc-framework = "0.2.0"
+poc-framework = { git = "https://github.com/neodyme-labs/solana-poc-framework.git", branch = "1.16" }
 ```
 This crate already re-exports every Solana dependency you should need.
+
+If your program needs a specific Solana version, you can just specify the corresponding branch. Currently the framework supports the following minor versions: 
+* 1.11
+* 1.13
+* 1.14
+* 1.16
+
 
 ## What this framework is for
 This framework was made for security researchers, to facilitate a fast and convenient development of Proof-of-Concepts for bugs in Solana smart contracts or even Solana core. The generic `Environment` interface allows for exploits to be developed locally, and then tested on Testnet or Devnet.
