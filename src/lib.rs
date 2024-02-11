@@ -13,6 +13,11 @@ use itertools::izip;
 use rand::{prelude::StdRng, rngs::OsRng, SeedableRng};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
+use solana_accounts_db::{
+    accounts_db::AccountShrinkThreshold,
+    accounts_index::AccountSecondaryIndexes,
+    transaction_results::{TransactionExecutionResult, TransactionResults},
+};
 use solana_cli_output::display::println_transaction;
 use solana_client::{rpc_client::RpcClient, rpc_config::RpcTransactionConfig};
 use solana_program::{
@@ -28,9 +33,7 @@ use solana_program::{
     sysvar::{self, rent},
 };
 use solana_runtime::{
-    accounts_db::AccountShrinkThreshold,
-    accounts_index::AccountSecondaryIndexes,
-    bank::{Bank, TransactionBalancesSet, TransactionExecutionResult, TransactionResults},
+    bank::{Bank, TransactionBalancesSet},
     genesis_utils,
     runtime_config::RuntimeConfig,
 };
@@ -62,6 +65,7 @@ pub use solana_transaction_status;
 pub use spl_associated_token_account;
 pub use spl_memo;
 pub use spl_token;
+pub use spl_token_2022;
 
 mod keys;
 mod programs;
@@ -642,6 +646,12 @@ impl LocalEnvironmentBuilder {
         );
         builder.add_account_with_data(spl_memo::ID, bpf_loader::ID, programs::SPL_MEMO3, true);
         builder.add_account_with_data(spl_token::ID, bpf_loader::ID, programs::SPL_TOKEN, true);
+        builder.add_account_with_data(
+            spl_token_2022::ID,
+            bpf_loader::ID,
+            programs::SPL_TOKEN_2022,
+            true,
+        );
         builder.add_account_with_lamports(rent::ID, sysvar::ID, 1);
         builder
     }
@@ -858,7 +868,7 @@ impl LocalEnvironmentBuilder {
             false,
             None,
             None,
-            &exit,
+            exit,
         );
 
         let env = LocalEnvironment {
