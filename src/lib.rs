@@ -35,6 +35,7 @@ use solana_program::{
 use solana_runtime::{
     bank::{Bank, TransactionBalancesSet},
     genesis_utils,
+    installed_scheduler_pool::BankWithScheduler,
     runtime_config::RuntimeConfig,
 };
 use solana_sdk::{
@@ -401,7 +402,7 @@ pub trait Environment {
 /// An clean environment that executes transactions locally. Good for testing and debugging.
 /// This environment has the most important SPL programs: spl-token, spl-associated-token-account and spl-memo v1 and v3.
 pub struct LocalEnvironment {
-    bank: Bank,
+    bank: BankWithScheduler,
     faucet: Keypair,
 }
 
@@ -416,7 +417,7 @@ impl LocalEnvironment {
         Self::builder().build()
     }
 
-    pub fn bank(&mut self) -> &mut Bank {
+    pub fn bank(&mut self) -> &mut BankWithScheduler {
         &mut self.bank
     }
 
@@ -854,7 +855,7 @@ impl LocalEnvironmentBuilder {
     pub fn build(&mut self) -> LocalEnvironment {
         let tmpdir = Path::new("/tmp/");
         let exit = Arc::new(AtomicBool::new(false));
-        let bank = Bank::new_with_paths(
+        let bank = BankWithScheduler::new_without_scheduler(Arc::new(Bank::new_with_paths(
             &self.config,
             Arc::new(RuntimeConfig::default()),
             vec![tmpdir.to_path_buf()],
@@ -868,8 +869,9 @@ impl LocalEnvironmentBuilder {
             false,
             None,
             None,
+            None,
             exit,
-        );
+        )));
 
         let env = LocalEnvironment {
             bank,
