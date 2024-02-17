@@ -75,7 +75,7 @@ pub trait Environment {
     /// Returns the keypair used to pay for all transactions. All transaction fees and rent costs are payed for by this keypair.
     fn payer(&self) -> Keypair;
     /// Executes the batch of transactions in the right order and waits for them to be confirmed. The execution results are returned.
-    fn execute_transaction<T>(&mut self, txs: T) -> EncodedConfirmedTransactionWithStatusMeta
+    fn execute_transaction<T>(&mut self, tx: T) -> EncodedConfirmedTransactionWithStatusMeta
     where
         VersionedTransaction: From<T>;
     /// Fetch a recent blockhash, for construction of transactions.
@@ -421,21 +421,17 @@ impl LocalEnvironment {
     }
 
     /// Advance the bank to the next blockhash.
-    pub fn advance_blockhash(&self) -> Hash {
-        let parent_distance = if self.bank.slot() == 0 {
-            1
-        } else {
-            self.bank.slot() - self.bank.parent_slot()
-        };
+    pub fn advance_blockhash(self) -> Self {
+        let new_slot = self.bank.slot().saturating_add(1);
 
-        for _ in 0..parent_distance {
-            let last_blockhash = self.bank.last_blockhash();
-            while self.bank.last_blockhash() == last_blockhash {
-                self.bank.register_tick(&Hash::new_unique())
-            }
+        while !self.bank.is_complete() {
+            self.bank.register_tick(&Hash::new_unique());
         }
 
-        self.get_latest_blockhash()
+        LocalEnvironment {
+            bank: Bank::new_from_parent(Arc::new(self.bank), &self.faucet.pubkey(), new_slot),
+            faucet: self.faucet,
+        }
     }
 
     pub fn execute_transactions<T>(
@@ -650,10 +646,6 @@ impl LocalEnvironmentBuilder {
             &[],
         );
         genesis_utils::activate_all_features(&mut config);
-        // Deactivate fix_recent_blockhashes feature to allow for advancing blockhashes without creating new banks
-        config
-            .accounts
-            .remove(&feature_set::fix_recent_blockhashes::id());
 
         // Deactiveate delay_visibility_of_program_deployment to allow to programs to run on the same slot they are deployed on
         config
@@ -914,9 +906,7 @@ impl LocalEnvironmentBuilder {
             bank,
             faucet: clone_keypair(&self.faucet),
         };
-        env.advance_blockhash();
-
-        env
+        env.advance_blockhash()
     }
 }
 
