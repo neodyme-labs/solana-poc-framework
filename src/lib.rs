@@ -162,7 +162,7 @@ pub trait Environment {
         signers: &[&Keypair],
     ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions(instructions, signers);
-        return self.execute_transaction(tx);
+        self.execute_transaction(tx)
     }
 
     /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the payer.
@@ -173,7 +173,7 @@ pub trait Environment {
         new_payer: Keypair,
     ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions_with_payer(instructions, signers, new_payer);
-        return self.execute_transaction(tx);
+        self.execute_transaction(tx)
     }
 
     /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the payer.
@@ -185,7 +185,7 @@ pub trait Environment {
     ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions(instructions, signers);
         println!("{:#?}", &tx);
-        return self.execute_transaction(tx);
+        self.execute_transaction(tx)
     }
 
     /// Assemble the given instructions into a transaction and sign it. All transactions executed by this method are signed and payed for by the new_payer.
@@ -198,7 +198,7 @@ pub trait Environment {
     ) -> EncodedConfirmedTransactionWithStatusMeta {
         let tx = self.tx_with_instructions_with_payer(instructions, signers, new_payer);
         println!("{:#?}", &tx);
-        return self.execute_transaction(tx);
+        self.execute_transaction(tx)
     }
 
     /// Executes a transaction constructing an empty account with the specified amount of space and lamports, owned by the provided program.
@@ -437,31 +437,32 @@ impl LocalEnvironment {
 
         self.get_latest_blockhash()
     }
-}
 
-impl Environment for LocalEnvironment {
-    fn payer(&self) -> Keypair {
-        clone_keypair(&self.faucet)
-    }
-
-    fn execute_transaction<T>(&mut self, tx: T) -> EncodedConfirmedTransactionWithStatusMeta
+    pub fn execute_transactions<T>(
+        &mut self,
+        txs: Vec<T>,
+    ) -> Vec<EncodedConfirmedTransactionWithStatusMeta>
     where
         VersionedTransaction: From<T>,
     {
-        let tx = tx.into();
-        let len = bincode::serialize(&tx).unwrap().len();
-        if len > packet::PACKET_DATA_SIZE {
-            panic!(
-                "tx {:?} of size {} is {} too large",
-                tx,
-                len,
-                len - packet::PACKET_DATA_SIZE
-            )
-        }
-        let txs = vec![tx];
-
+        let txs = txs
+            .into_iter()
+            .map(|tx| {
+                let tx = VersionedTransaction::from(tx);
+                let len = bincode::serialize(&tx).unwrap().len();
+                if len > packet::PACKET_DATA_SIZE {
+                    panic!(
+                        "tx {:?} of size {} is {} too large",
+                        tx,
+                        len,
+                        len - packet::PACKET_DATA_SIZE
+                    )
+                }
+                tx
+            })
+            .collect::<Vec<_>>();
         let batch = self.bank.prepare_entry_batch(txs.clone()).unwrap();
-        let tx_sanitized = batch.sanitized_transactions()[0].clone();
+        let txs_sanitized = batch.sanitized_transactions();
 
         let mut mint_decimals = HashMap::new();
         let tx_pre_token_balances = solana_ledger::token_balances::collect_token_balances(
@@ -496,103 +497,138 @@ impl Environment for LocalEnvironment {
             &batch,
             &mut mint_decimals,
         );
-        let (
+
+        let mut encoded_confirmed_txs = vec![];
+
+        for (
             tx,
             execution_result,
             pre_balances,
             post_balances,
             pre_token_balances,
             post_token_balances,
-        ) = izip!(
+            tx_sanitized,
+        ) in izip!(
             txs.iter(),
             execution_results.into_iter(),
             pre_balances.into_iter(),
             post_balances.into_iter(),
             tx_pre_token_balances.into_iter(),
             tx_post_token_balances.into_iter(),
-        ).next().expect("transaction could not be executed. Enable debug logging to get more information on why");
+            txs_sanitized.into_iter(),
+        ) {
+            let fee = self
+                .bank
+                .get_fee_for_message(tx_sanitized.message())
+                .expect("Fee calculation must succeed");
 
-        let fee = self
-            .bank
-            .get_fee_for_message(tx_sanitized.message())
-            .expect("Fee calculation must succeed");
+            let status;
+            let inner_instructions;
+            let log_messages;
+            let return_data;
+            let compute_units_consumed;
 
-        let status;
-        let inner_instructions;
-        let log_messages;
-        let return_data;
-        let compute_units_consumed;
-
-        match execution_result {
-            TransactionExecutionResult::Executed { details, .. } => {
-                status = details.status;
-                inner_instructions = details.inner_instructions;
-                log_messages = details.log_messages;
-                return_data = details.return_data;
-                compute_units_consumed = Some(details.executed_units);
+            match execution_result {
+                TransactionExecutionResult::Executed { details, .. } => {
+                    status = details.status;
+                    inner_instructions = details.inner_instructions;
+                    log_messages = details.log_messages;
+                    return_data = details.return_data;
+                    compute_units_consumed = Some(details.executed_units);
+                }
+                TransactionExecutionResult::NotExecuted(err) => {
+                    status = Err(err);
+                    inner_instructions = None;
+                    log_messages = None;
+                    return_data = None;
+                    compute_units_consumed = None;
+                }
             }
-            TransactionExecutionResult::NotExecuted(err) => {
-                status = Err(err);
-                inner_instructions = None;
-                log_messages = None;
-                return_data = None;
-                compute_units_consumed = None;
-            }
+
+            let inner_instructions = inner_instructions.map(|inner_instructions| {
+                inner_instructions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, instructions)| {
+                        let inner_ixs_mapped = instructions
+                            .into_iter()
+                            .map(|x| solana_transaction_status::InnerInstruction {
+                                instruction: x.instruction,
+                                stack_height: Some(x.stack_height as u32),
+                            })
+                            .collect();
+                        InnerInstructions {
+                            index: index as u8,
+                            instructions: inner_ixs_mapped,
+                        }
+                    })
+                    .filter(|i| !i.instructions.is_empty())
+                    .collect()
+            });
+            let tx_status_meta = TransactionStatusMeta {
+                status,
+                fee,
+                pre_balances,
+                post_balances,
+                pre_token_balances: Some(pre_token_balances),
+                post_token_balances: Some(post_token_balances),
+                inner_instructions,
+                log_messages,
+                rewards: None,
+                loaded_addresses: tx_sanitized.get_loaded_addresses(),
+                return_data,
+                compute_units_consumed,
+            };
+            encoded_confirmed_txs.push(
+                ConfirmedTransactionWithStatusMeta {
+                    slot,
+                    tx_with_meta: TransactionWithStatusMeta::Complete(
+                        VersionedTransactionWithStatusMeta {
+                            transaction: tx.clone(),
+                            meta: tx_status_meta,
+                        },
+                    ),
+                    block_time: Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            .try_into()
+                            .unwrap(),
+                    ),
+                }
+                .encode(UiTransactionEncoding::Binary, Some(0))
+                .expect("Failed to encode transaction"),
+            );
+        }
+        encoded_confirmed_txs
+    }
+}
+
+impl Environment for LocalEnvironment {
+    fn payer(&self) -> Keypair {
+        clone_keypair(&self.faucet)
+    }
+
+    fn execute_transaction<T>(&mut self, tx: T) -> EncodedConfirmedTransactionWithStatusMeta
+    where
+        VersionedTransaction: From<T>,
+    {
+        let tx: VersionedTransaction = tx.into();
+        let len = bincode::serialize(&tx).unwrap().len();
+        if len > packet::PACKET_DATA_SIZE {
+            panic!(
+                "tx {:?} of size {} is {} too large",
+                tx,
+                len,
+                len - packet::PACKET_DATA_SIZE
+            )
         }
 
-        let inner_instructions = inner_instructions.map(|inner_instructions| {
-            inner_instructions
-                .into_iter()
-                .enumerate()
-                .map(|(index, instructions)| {
-                    let inner_ixs_mapped = instructions
-                        .into_iter()
-                        .map(|x| solana_transaction_status::InnerInstruction {
-                            instruction: x.instruction,
-                            stack_height: Some(x.stack_height as u32),
-                        })
-                        .collect();
-                    InnerInstructions {
-                        index: index as u8,
-                        instructions: inner_ixs_mapped,
-                    }
-                })
-                .filter(|i| !i.instructions.is_empty())
-                .collect()
-        });
-
-        let tx_status_meta = TransactionStatusMeta {
-            status,
-            fee,
-            pre_balances,
-            post_balances,
-            pre_token_balances: Some(pre_token_balances),
-            post_token_balances: Some(post_token_balances),
-            inner_instructions,
-            log_messages,
-            rewards: None,
-            loaded_addresses: tx_sanitized.get_loaded_addresses(),
-            return_data,
-            compute_units_consumed,
-        };
-
-        ConfirmedTransactionWithStatusMeta {
-            slot,
-            tx_with_meta: TransactionWithStatusMeta::Complete(VersionedTransactionWithStatusMeta {
-                transaction: tx.clone(),
-                meta: tx_status_meta,
-            }),
-            block_time: Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    .try_into()
-                    .unwrap(),
-            ),
-        }
-        .encode(UiTransactionEncoding::Binary, Some(0))
-        .expect("Failed to encode transaction")
+        self.execute_transactions::<VersionedTransaction>(vec![tx])
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     fn get_latest_blockhash(&self) -> Hash {
@@ -629,6 +665,11 @@ impl LocalEnvironmentBuilder {
             .accounts
             .remove(&feature_set::fix_recent_blockhashes::id());
 
+        // Deactiveate delay_visibility_of_program_deployment to allow to programs to run on the same slot they are deployed on
+        config
+            .accounts
+            .remove(&feature_set::delay_visibility_of_program_deployment::id());
+
         let mut builder = LocalEnvironmentBuilder { faucet, config };
         builder.add_account_with_data(
             spl_associated_token_account::ID,
@@ -650,6 +691,14 @@ impl LocalEnvironmentBuilder {
             spl_token_2022::ID,
             bpf_loader::ID,
             programs::SPL_TOKEN_2022,
+            true,
+        );
+        builder.add_account_with_data(
+            "shmem4EWT2sPdVGvTZCzXXRAURL9G5vpPxNwSeKhHUL"
+                .parse()
+                .unwrap(),
+            bpf_loader::ID,
+            programs::SPL_SHARED_MEMORY,
             true,
         );
         builder.add_account_with_lamports(rent::ID, sysvar::ID, 1);
