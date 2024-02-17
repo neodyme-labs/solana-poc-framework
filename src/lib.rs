@@ -615,16 +615,6 @@ impl Environment for LocalEnvironment {
         VersionedTransaction: From<T>,
     {
         let tx: VersionedTransaction = tx.into();
-        let len = bincode::serialize(&tx).unwrap().len();
-        if len > packet::PACKET_DATA_SIZE {
-            panic!(
-                "tx {:?} of size {} is {} too large",
-                tx,
-                len,
-                len - packet::PACKET_DATA_SIZE
-            )
-        }
-
         self.execute_transactions::<VersionedTransaction>(vec![tx])
             .into_iter()
             .next()
