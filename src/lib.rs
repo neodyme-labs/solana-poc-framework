@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use borsh::BorshDeserialize;
+use borsh::{BorshDeserialize, BorshSerialize};
 use bpf_loader_upgradeable::UpgradeableLoaderState;
 use itertools::izip;
 use rand::{prelude::StdRng, rngs::OsRng, SeedableRng};
@@ -23,7 +23,7 @@ use solana_client::{rpc_client::RpcClient, rpc_config::RpcTransactionConfig};
 use solana_program::{
     bpf_loader, bpf_loader_upgradeable,
     hash::Hash,
-    instruction::Instruction,
+    instruction::{AccountMeta, Instruction},
     loader_instruction,
     message::Message,
     program_option::COption,
@@ -42,9 +42,8 @@ use solana_sdk::{
     commitment_config::CommitmentConfig,
     feature_set,
     genesis_config::GenesisConfig,
-    packet,
-    signature::Keypair,
-    signature::Signer,
+    packet::{self, PACKET_DATA_SIZE},
+    signature::{Keypair, Signature, Signer},
     system_transaction,
     transaction::{Transaction, VersionedTransaction},
 };
@@ -325,9 +324,77 @@ pub trait Environment {
         acc
     }
 
+    /// Execute a transaction creating and filling a given account with the given data.
+    /// The account is required to be empty and will be owned by spl_shared_memory afterwards.
+    // Development note: Prefer this function due to efficiencies.
+    fn create_account_with_data(&mut self, account: &Keypair, data: &[u8]) {
+        let shared_memory_program_id: Pubkey = "shmem4EWT2sPdVGvTZCzXXRAURL9G5vpPxNwSeKhHUL"
+            .parse()
+            .unwrap();
+        // Calculate the largest chunk size that can be written to the account in a single transaction.
+        let chunk_size = PACKET_DATA_SIZE.saturating_sub(1).saturating_sub(
+            bincode::serialized_size(&Transaction {
+                signatures: vec![Signature::default()],
+                message: Message::new(
+                    &[Instruction::new_with_bincode(
+                        shared_memory_program_id,
+                        &[0u64],
+                        vec![AccountMeta::new(account.pubkey(), false)],
+                    )],
+                    Some(&self.payer().pubkey()),
+                ),
+            })
+            .unwrap() as usize,
+        );
+
+        self.execute_as_transaction(
+            &[system_instruction::create_account(
+                &self.payer().pubkey(),
+                &account.pubkey(),
+                self.get_rent_excemption(data.len()),
+                data.len() as u64,
+                &shared_memory_program_id,
+            )],
+            &[&self.payer(), account],
+        )
+        .assert_success();
+
+        let mut offset = 0usize;
+        for chunk in data.chunks(chunk_size) {
+            println!("writing bytes {} to {}", offset, offset + chunk.len());
+            let tx_data = [&(offset as u64).to_le_bytes(), chunk].concat();
+            self.execute_as_transaction(
+                &[Instruction::new_with_bytes(
+                    shared_memory_program_id,
+                    &tx_data,
+                    vec![AccountMeta::new(account.pubkey(), false)],
+                )],
+                &[],
+            )
+            .assert_success();
+            offset += chunk.len();
+        }
+    }
+
+    /// Execute a transaction creating and filling a given account with the given data.
+    /// Serializes the data using bincode.
+    fn create_account_with_bincode<T: ?Sized + serde::Serialize>(
+        &mut self,
+        account: &Keypair,
+        data: &T,
+    ) {
+        self.create_account_with_data(account, &bincode::serialize(&data).unwrap());
+    }
+
+    /// Execute a transaction creating and filling a given account with the given data.
+    /// Serializes the data using borsh.
+    fn create_account_with_borsh<T: BorshSerialize>(&mut self, account: &Keypair, data: &T) {
+        self.create_account_with_data(account, &data.try_to_vec().unwrap());
+    }
+
     /// Executes a transaction creating and filling the given account with the given data.
     /// The account is required to be empty and will be owned by bpf_loader afterwards.
-    fn create_account_with_data(&mut self, account: &Keypair, data: Vec<u8>) {
+    fn create_program_account_with_data(&mut self, account: &Keypair, data: &[u8]) {
         self.execute_transaction(system_transaction::create_account(
             &self.payer(),
             account,
@@ -365,7 +432,7 @@ pub trait Environment {
         let keypair = Keypair::generate(&mut rng);
 
         if self.get_account(keypair.pubkey()).is_none() {
-            self.create_account_with_data(&keypair, data);
+            self.create_program_account_with_data(&keypair, &data);
             self.execute_as_transaction(
                 &[loader_instruction::finalize(
                     &keypair.pubkey(),
