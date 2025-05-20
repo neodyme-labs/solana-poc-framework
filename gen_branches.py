@@ -2,28 +2,21 @@ import os
 from git import Repo
 import toml
 BRANCHES = [
-    '1.11',
-    '1.13',
-    '1.14',
-    '1.16',
+  "2.2"
 ]
 
 IMPORTANT_MODULES = [
     "solana-sdk",
     "solana-program",
     "solana-logger",
-    "solana-runtime",
+    "solana-runtime", 
     "solana-transaction-status",
     "solana-cli-output",
-    "solana-bpf-loader-program",
-    "solana-compute-budget-program",
-    "solana-vote-program",
-    "solana-stake-program",
-    "solana-config-program",
+    "solana-accounts-db",
     "solana-client",
-    "solana-faucet",
     "solana-program-runtime",
     "solana-ledger",
+    "solana-svm",
 ]
 
 
