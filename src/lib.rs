@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     path::Path,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::AtomicBool, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,38 +13,34 @@ use itertools::izip;
 use rand::{prelude::StdRng, rngs::OsRng, SeedableRng};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
+use solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS;
 use solana_cli_output::display::println_transaction;
 use solana_client::{rpc_client::RpcClient, rpc_config::RpcTransactionConfig};
 use solana_program::{
-    bpf_loader, bpf_loader_upgradeable,
-    hash::Hash,
-    instruction::Instruction,
-    loader_instruction,
-    message::Message,
-    program_option::COption,
-    program_pack::Pack,
-    pubkey::Pubkey,
+    bpf_loader, bpf_loader_upgradeable, hash::Hash, instruction::Instruction, loader_v4,
+    message::Message, program_option::COption, program_pack::Pack, pubkey::Pubkey,
     system_instruction, system_program,
-    sysvar::{self, rent},
 };
+
 use solana_runtime::{
-    accounts_db::AccountShrinkThreshold,
-    accounts_index::AccountSecondaryIndexes,
-    bank::{Bank, TransactionBalancesSet, TransactionExecutionResult, TransactionResults},
+    bank::{Bank, TransactionBalancesSet},
+    bank_forks::BankForks,
     genesis_utils,
+    installed_scheduler_pool::BankWithScheduler,
     runtime_config::RuntimeConfig,
 };
 use solana_sdk::{
     account::{Account, AccountSharedData},
+    account_utils::StateMut,
     commitment_config::CommitmentConfig,
-    feature_set,
+    feature_set::{self},
     genesis_config::GenesisConfig,
     packet,
-    signature::Keypair,
-    signature::Signer,
+    signature::{Keypair, Signer},
     system_transaction,
     transaction::{Transaction, VersionedTransaction},
 };
+use solana_svm::transaction_processor::ExecutionRecordingConfig;
 use solana_transaction_status::{
     ConfirmedTransactionWithStatusMeta, EncodedConfirmedTransactionWithStatusMeta,
     InnerInstructions, TransactionStatusMeta, TransactionWithStatusMeta, UiTransactionEncoding,
@@ -62,6 +58,7 @@ pub use solana_transaction_status;
 pub use spl_associated_token_account;
 pub use spl_memo;
 pub use spl_token;
+pub use spl_token_2022;
 
 mod keys;
 mod programs;
@@ -338,7 +335,7 @@ pub trait Environment {
         for chunk in data.chunks(900) {
             println!("writing bytes {} to {}", offset, offset + chunk.len());
             self.execute_as_transaction(
-                &[loader_instruction::write(
+                &[loader_v4::write(
                     &account.pubkey(),
                     &bpf_loader::id(),
                     offset as u32,
@@ -363,9 +360,10 @@ pub trait Environment {
         if self.get_account(keypair.pubkey()).is_none() {
             self.create_account_with_data(&keypair, data);
             self.execute_as_transaction(
-                &[loader_instruction::finalize(
+                &[loader_v4::finalize(
                     &keypair.pubkey(),
                     &bpf_loader::id(),
+                    &keypair.pubkey(),
                 )],
                 &[&keypair],
             )
@@ -397,7 +395,8 @@ pub trait Environment {
 /// An clean environment that executes transactions locally. Good for testing and debugging.
 /// This environment has the most important SPL programs: spl-token, spl-associated-token-account and spl-memo v1 and v3.
 pub struct LocalEnvironment {
-    bank: Bank,
+    bank: BankWithScheduler,
+    bank_forks: Arc<RwLock<BankForks>>,
     faucet: Keypair,
 }
 
@@ -412,7 +411,7 @@ impl LocalEnvironment {
         Self::builder().build()
     }
 
-    pub fn bank(&mut self) -> &mut Bank {
+    pub fn bank(&mut self) -> &mut BankWithScheduler {
         &mut self.bank
     }
 
@@ -432,6 +431,19 @@ impl LocalEnvironment {
         }
 
         self.get_latest_blockhash()
+    }
+
+    pub fn advance_slot(&mut self) {
+        let new_bank = Bank::new_from_parent(
+            self.bank.clone_without_scheduler(),
+            self.bank.collector_id(),
+            self.bank.slot() + 1,
+        );
+        let bank_forks = BankForks::new_rw_arc(new_bank);
+        let bank = bank_forks.read().unwrap().working_bank_with_scheduler();
+
+        self.bank_forks = bank_forks;
+        self.bank = bank;
     }
 }
 
@@ -467,10 +479,9 @@ impl Environment for LocalEnvironment {
         );
         let slot = self.bank.slot();
         let mut timings = Default::default();
+        let recording_config = ExecutionRecordingConfig::new_single_setting(true);
         let (
-            TransactionResults {
-                execution_results, ..
-            },
+            execution_results,
             TransactionBalancesSet {
                 pre_balances,
                 post_balances,
@@ -480,9 +491,7 @@ impl Environment for LocalEnvironment {
             &batch,
             usize::MAX,
             true,
-            true,
-            true,
-            true,
+            recording_config,
             &mut timings,
             None,
         );
@@ -520,15 +529,16 @@ impl Environment for LocalEnvironment {
         let compute_units_consumed;
 
         match execution_result {
-            TransactionExecutionResult::Executed { details, .. } => {
-                status = details.status;
-                inner_instructions = details.inner_instructions;
-                log_messages = details.log_messages;
-                return_data = details.return_data;
-                compute_units_consumed = Some(details.executed_units);
+            Ok(res) => {
+                status = res.status;
+                inner_instructions = res.inner_instructions;
+                log_messages = res.log_messages;
+                return_data = res.return_data;
+                compute_units_consumed = Some(res.executed_units);
             }
-            TransactionExecutionResult::NotExecuted(err) => {
-                status = Err(err);
+
+            Err(e) => {
+                status = Err(e);
                 inner_instructions = None;
                 log_messages = None;
                 return_data = None;
@@ -642,7 +652,12 @@ impl LocalEnvironmentBuilder {
         );
         builder.add_account_with_data(spl_memo::ID, bpf_loader::ID, programs::SPL_MEMO3, true);
         builder.add_account_with_data(spl_token::ID, bpf_loader::ID, programs::SPL_TOKEN, true);
-        builder.add_account_with_lamports(rent::ID, sysvar::ID, 1);
+        builder.add_account_with_data(
+            spl_token_2022::ID,
+            bpf_loader::ID,
+            programs::SPL_TOKEN_2022,
+            true,
+        );
         builder
     }
 
@@ -788,6 +803,45 @@ impl LocalEnvironmentBuilder {
     }
 
     /// Clone an account from a cluster using the given rpc client. Use [clone_upgradable_program_from_cluster] if you want to clone a upgradable program, as this requires multiple accounts.
+    pub fn clone_programdata_from_cluster(
+        &mut self,
+        pubkey: Pubkey,
+        client: &RpcClient,
+    ) -> &mut Self {
+        println!("Loading account {} from cluster", pubkey);
+        let mut account = client
+            .get_account(&pubkey)
+            .expect("couldn't retrieve account");
+
+        let programdata: UpgradeableLoaderState = account.deserialize_data().unwrap();
+        if let UpgradeableLoaderState::ProgramData {
+            upgrade_authority_address,
+            slot: _,
+        } = programdata
+        {
+            account
+                .set_state(&UpgradeableLoaderState::ProgramData {
+                    slot: 0,
+                    upgrade_authority_address: upgrade_authority_address,
+                })
+                .unwrap();
+
+            self.add_account(
+                pubkey,
+                Account {
+                    lamports: account.lamports,
+                    data: account.data,
+                    executable: account.executable,
+                    owner: account.owner,
+                    rent_epoch: 0,
+                },
+            )
+        } else {
+            self
+        }
+    }
+
+    /// Clone an account from a cluster using the given rpc client. Use [clone_upgradable_program_from_cluster] if you want to clone a upgradable program, as this requires multiple accounts.
     pub fn clone_account_from_cluster(&mut self, pubkey: Pubkey, client: &RpcClient) -> &mut Self {
         println!("Loading account {} from cluster", pubkey);
         let account = client
@@ -833,7 +887,7 @@ impl LocalEnvironmentBuilder {
         } = upgradable
         {
             self.add_account(pubkey, account);
-            self.clone_account_from_cluster(programdata_address, client);
+            self.clone_programdata_from_cluster(programdata_address, client);
         } else {
             panic!("Account is not an upgradable program")
         }
@@ -850,22 +904,26 @@ impl LocalEnvironmentBuilder {
             vec![tmpdir.to_path_buf()],
             None,
             None,
-            AccountSecondaryIndexes {
-                keys: None,
-                indexes: HashSet::new(),
-            },
-            AccountShrinkThreshold::default(),
             false,
+            Some(ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS),
+            None,
+            Some(random_keypair().pubkey()),
+            exit.clone(),
             None,
             None,
-            &exit,
         );
 
-        let env = LocalEnvironment {
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().working_bank_with_scheduler();
+
+        let mut env = LocalEnvironment {
             bank,
+            bank_forks,
             faucet: clone_keypair(&self.faucet),
         };
         env.advance_blockhash();
+
+        env.advance_slot();
 
         env
     }
