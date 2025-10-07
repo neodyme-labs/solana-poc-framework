@@ -47,6 +47,7 @@ use solana_transaction_status::{
     VersionedTransactionWithStatusMeta,
 };
 use spl_associated_token_account::get_associated_token_address;
+use tempfile::TempDir;
 
 pub use bincode;
 pub use borsh;
@@ -398,6 +399,10 @@ pub struct LocalEnvironment {
     bank: BankWithScheduler,
     bank_forks: Arc<RwLock<BankForks>>,
     faucet: Keypair,
+    // Keep temporary directly alive until the local environment is dropped. It
+    // is last in the struct in order to be dropped last.
+    #[allow(dead_code)] // It's just here to be dropped, not read.
+    tmpdir: TempDir,
 }
 
 impl LocalEnvironment {
@@ -896,12 +901,12 @@ impl LocalEnvironmentBuilder {
 
     /// Finalizes the environment.
     pub fn build(&mut self) -> LocalEnvironment {
-        let tmpdir = Path::new("/tmp/");
+        let tmpdir = TempDir::new().expect("make tempdir");
         let exit = Arc::new(AtomicBool::new(false));
         let bank = Bank::new_with_paths(
             &self.config,
             Arc::new(RuntimeConfig::default()),
-            vec![tmpdir.to_path_buf()],
+            vec![tmpdir.path().to_path_buf()],
             None,
             None,
             false,
@@ -920,6 +925,7 @@ impl LocalEnvironmentBuilder {
             bank,
             bank_forks,
             faucet: clone_keypair(&self.faucet),
+            tmpdir,
         };
         env.advance_blockhash();
 
